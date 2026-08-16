@@ -38,16 +38,27 @@ Python 3.11+, [aiogram 3](https://docs.aiogram.dev), SQLite. Внешних се
 
 ## Запуск
 
-```bash
-git clone https://github.com/traccch/111.git
-cd 111
+Нужен только Python 3.10+ и токен бота от [@BotFather](https://t.me/BotFather)
+(в Telegram: `/newbot` → имя → username → он пришлёт строку вида
+`8123456789:AAH-…`).
 
+**Одной командой.** Скрипт сам создаст окружение, поставит зависимости,
+спросит токен и запустит бота:
+
+```bash
+./run.sh            # macOS и Linux
+```
+
+Под Windows — двойной клик по `run.bat`. Токен сохранится в файл `.env`, при
+следующих запусках его не спросят. Бот работает, пока открыто окно терминала;
+остановить — Ctrl+C.
+
+**Вручную**, если хочется контролировать шаги:
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-# впиши в .env токен, полученный у @BotFather
-
+cp .env.example .env     # и вписать BOT_TOKEN
 python -m bot.main
 ```
 
@@ -82,6 +93,7 @@ python -m bot.main
 ## Как всё устроено
 
 ```
+run.sh, run.bat   запуск в одну команду: окружение, зависимости, токен, старт
 bot/
   main.py         точка входа: бот, диспетчер, long polling
   config.py       чтение .env

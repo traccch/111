@@ -8,6 +8,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 
 from .config import load_config
@@ -52,10 +53,28 @@ async def run() -> None:
     dispatcher.include_router(build_router())
 
     try:
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError:
+            print(
+                "\n✗ Telegram не принял токен.\n"
+                "  Проверь строку BOT_TOKEN в файле .env — она должна быть ровно такой,\n"
+                "  какую прислал @BotFather. Если бот удалён или токен отозван,\n"
+                "  получи новый через /newbot или /token у @BotFather.\n"
+            )
+            return
+        except TelegramNetworkError:
+            print(
+                "\n✗ Не получается достучаться до Telegram.\n"
+                "  Проверь интернет. Если Telegram блокируется провайдером,\n"
+                "  запусти бота через VPN.\n"
+            )
+            return
+
         await bot.set_my_commands(COMMANDS)
         await bot.delete_webhook(drop_pending_updates=True)
-        me = await bot.get_me()
-        logger.info("Запускаюсь как @%s", me.username)
+        logger.info("Бот @%s запущен. Открой его в Telegram и напиши /start", me.username)
+        print(f"\n✓ Бот работает: https://t.me/{me.username}\n")
         await dispatcher.start_polling(bot)
     finally:
         await db.close()
