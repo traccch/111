@@ -1,9 +1,13 @@
 @echo off
-rem Запуск бота под Windows: двойной клик по этому файлу.
-rem Скрипт сам создаст окружение, поставит зависимости, спросит токен и включит бота.
-
+rem Switch console to UTF-8 before any non-ASCII text in this file,
+rem otherwise cmd renders Russian messages as garbage.
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
+title Бот учёта расходов
+
+rem Запуск бота под Windows: двойной клик по этому файлу.
+rem Скрипт сам создаст окружение, поставит зависимости, спросит токен и включит бота.
 
 rem ------------------------------------------------------------- 1. Python
 set "PYTHON="
