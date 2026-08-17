@@ -98,6 +98,18 @@ def export_kinds() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="📄 PDF за месяц", callback_data="exp:pdf"),
                 InlineKeyboardButton(text="📊 CSV со всем", callback_data="exp:csv"),
+            ],
+            [InlineKeyboardButton(text="🤖 JSON для ИИ", callback_data="exp:json")],
+        ]
+    )
+
+
+def confirm_import() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Применить", callback_data="import:apply"),
+                InlineKeyboardButton(text="✖️ Отмена", callback_data="import:cancel"),
             ]
         ]
     )

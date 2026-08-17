@@ -32,7 +32,8 @@ COMMANDS = [
     BotCommand(command="limits", description="Список лимитов"),
     BotCommand(command="remind", description="Напоминать записывать траты"),
     BotCommand(command="cats", description="Категории"),
-    BotCommand(command="export", description="Выгрузка в CSV"),
+    BotCommand(command="export", description="Выгрузка: PDF, CSV, JSON"),
+    BotCommand(command="import", description="Залить правки от ИИ"),
     BotCommand(command="help", description="Как пользоваться"),
 ]
 

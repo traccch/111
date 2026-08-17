@@ -15,6 +15,7 @@ from ..keyboards import category_picker, delete_buttons, expense_actions
 from ..parsing import (
     ParseError,
     count_amounts,
+    parse_amount,
     first_keyword,
     match_category,
     parse_expense,
@@ -47,6 +48,41 @@ async def cmd_delete(
         await message.answer(f"🗑 Трата #{int(raw)} удалена.")
     else:
         await message.answer("Такой траты нет.")
+
+
+@router.message(Command("edit"))
+async def cmd_edit(
+    message: Message, command: CommandObject, db: Database, user: UserSettings,
+    today: dt.date,
+) -> None:
+    """Правка суммы у уже записанной траты: /edit 42 6000 [комментарий]."""
+    parts = (command.args or "").strip().lstrip("#").split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        await message.answer(
+            "Формат: <code>/edit 42 6000</code> — поставит трате #42 сумму 6 000.\n"
+            "Можно заодно поправить комментарий: <code>/edit 42 6000 продукты</code>.\n"
+            "Номер траты виден в /last."
+        )
+        return
+
+    expense_id = int(parts[0])
+    parsed = parse_amount(parts[1]) if len(parts) > 1 else None
+    if parsed is None or parsed[0] <= 0:
+        await message.answer("Не понял новую сумму. Например: <code>/edit 42 6000</code>")
+        return
+
+    amount, note = parsed
+    updated = await db.update_expense(
+        user.user_id, expense_id, amount=amount, note=note or None
+    )
+    if updated is None:
+        await message.answer("Такой траты нет. Список — /last")
+        return
+
+    await message.answer(
+        "✏️ Исправил:\n" + render_expense(updated, user, today),
+        reply_markup=expense_actions(updated),
+    )
 
 
 @router.message(Command("undo"))

@@ -500,6 +500,43 @@ class Database:
             return None
         return await self.get_expense(user_id, expense_id)
 
+    async def update_expense(
+        self,
+        user_id: int,
+        expense_id: int,
+        amount: Optional[int] = None,
+        note: Optional[str] = None,
+        spent_on: Optional[dt.date] = None,
+        category_id: Optional[int] = None,
+    ) -> Optional[Expense]:
+        """Меняет переданные поля траты. Ничего не передали — ничего не трогаем."""
+        fields: list[str] = []
+        values: list[object] = []
+        if amount is not None:
+            fields.append("amount = ?")
+            values.append(amount)
+        if note is not None:
+            fields.append("note = ?")
+            values.append(note.strip())
+        if spent_on is not None:
+            fields.append("spent_on = ?")
+            values.append(spent_on.isoformat())
+        if category_id is not None:
+            fields.append("category_id = ?")
+            values.append(category_id)
+        if not fields:
+            return await self.get_expense(user_id, expense_id)
+
+        values.extend([user_id, expense_id])
+        cur = await self.conn.execute(
+            f"UPDATE expenses SET {', '.join(fields)} WHERE user_id = ? AND id = ?",
+            values,
+        )
+        await self.conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return await self.get_expense(user_id, expense_id)
+
     async def expenses_between(
         self, user_id: int, start: dt.date, end: dt.date
     ) -> list[Expense]:

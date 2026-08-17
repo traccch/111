@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import tempfile
 import unittest
@@ -25,7 +26,15 @@ from aiogram.methods import (
     TelegramMethod,
 )
 from aiogram.methods.base import TelegramType
-from aiogram.types import CallbackQuery, Chat, Message, Update, User, Voice
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    Document,
+    Message,
+    Update,
+    User,
+    Voice,
+)
 
 from bot import charts
 from bot.ai import AiExpense, AiResult
@@ -49,6 +58,8 @@ class RecordingBot(Bot):
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
         self.calls: list[TelegramMethod[Any]] = []
+        #: что отдать при скачивании файла — тесты подменяют перед отправкой
+        self.file_payload = b"OggS-fake-voice"
 
     async def __call__(self, method: TelegramMethod[TelegramType], request_timeout=None):
         self.calls.append(method)
@@ -65,7 +76,7 @@ class RecordingBot(Bot):
     async def download(self, file, destination=None, **kwargs):
         """Вместо похода в Telegram отдаём заранее известные байты."""
         if destination is not None:
-            destination.write(b"OggS-fake-voice")
+            destination.write(self.file_payload)
             return destination
         return None
 
@@ -363,6 +374,113 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         edits = [call for call in self.bot.calls if isinstance(call, EditMessageMedia)]
         self.assertEqual(len(edits), 1)
 
+    # ------------------------------------------- круг «выгрузил → правки → залил»
+
+    async def send_document(self, payload: bytes, filename: str = "expenses.json") -> str:
+        """Присылает боту файл; RecordingBot отдаст эти байты при скачивании."""
+        self.bot.file_payload = payload
+        self._update_id += 1
+        message = make_message("", message_id=self._update_id).model_copy(
+            update={
+                "text": None,
+                "document": Document(
+                    file_id=f"doc-{self._update_id}",
+                    file_unique_id=f"u{self._update_id}",
+                    file_name=filename,
+                    file_size=len(payload),
+                ),
+            }
+        )
+        await self.dp.feed_update(self.bot, Update(update_id=self._update_id, message=message))
+        return self.bot.last_shown
+
+    async def exported_json(self) -> bytes:
+        await self.send("/export")
+        await self.click("exp:json")
+        document = [call for call in self.bot.calls if isinstance(call, SendDocument)][-1]
+        return document.document.data
+
+    async def test_json_export_has_context(self):
+        await self.send("кофе 300")
+        await self.send("/limit 60000")
+
+        data = json.loads((await self.exported_json()).decode("utf-8"))
+        self.assertEqual(data["format"], "expenses-export")
+        self.assertEqual(data["expenses"][0]["amount"], 300.0)
+        self.assertIn("Кафе", [item["name"] for item in data["categories"]])
+        self.assertEqual(data["limits"]["Всего за месяц"], 60000.0)
+
+    async def test_import_fixes_a_typo(self):
+        await self.send("аренда 60000")  # опечатка: хотели 6 000
+        raw = await self.exported_json()
+
+        data = json.loads(raw.decode("utf-8"))
+        data["expenses"][0]["amount"] = 6000
+        answer = await self.send_document(json.dumps(data).encode("utf-8"))
+
+        self.assertIn("Что изменится", answer)
+        self.assertIn("Исправлю 1", answer)
+        # до подтверждения база не тронута
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 6000000)
+
+        await self.click("import:apply")
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 600000)
+        self.assertIn("Применил", self.bot.last_shown)
+
+    async def test_import_can_be_cancelled(self):
+        await self.send("кофе 300")
+        data = json.loads((await self.exported_json()).decode("utf-8"))
+        data["expenses"][0]["amount"] = 1
+
+        await self.send_document(json.dumps(data).encode("utf-8"))
+        await self.click("import:cancel")
+
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 30000)
+        self.assertIn("Ничего не изменилось", self.bot.last_shown)
+
+    async def test_import_adds_and_deletes(self):
+        await self.send("кофе 300")
+        data = json.loads((await self.exported_json()).decode("utf-8"))
+        data["expenses"][0]["delete"] = True
+        data["expenses"].append(
+            {"date": "2026-08-15", "amount": 450, "category": "Транспорт", "note": "такси"}
+        )
+
+        await self.send_document(json.dumps(data).encode("utf-8"))
+        await self.click("import:apply")
+
+        expenses = await self.db.last_expenses(USER_ID)
+        self.assertEqual(len(expenses), 1)
+        self.assertEqual(expenses[0].amount, 45000)
+        self.assertEqual(expenses[0].category_name, "Транспорт")
+
+    async def test_unchanged_file_says_so(self):
+        await self.send("кофе 300")
+        raw = await self.exported_json()
+        self.assertIn("Расхождений", await self.send_document(raw))
+
+    async def test_broken_file_is_explained(self):
+        await self.send("кофе 300")
+        self.assertIn("не JSON", await self.send_document(b"{ broken"))
+        self.assertIn(".json", await self.send_document(b"id;date", filename="expenses.csv"))
+
+    async def test_edit_command(self):
+        await self.send("аренда 60000")
+        expense = (await self.db.last_expenses(USER_ID))[0]
+
+        self.assertIn("Исправил", await self.send(f"/edit {expense.id} 6000"))
+        updated = await self.db.get_expense(USER_ID, expense.id)
+        self.assertEqual(updated.amount, 600000)
+        self.assertEqual(updated.note, "аренда")  # комментарий не тронут
+
+        self.assertIn("продукты", await self.send(f"/edit {expense.id} 6000 продукты"))
+        self.assertEqual((await self.db.get_expense(USER_ID, expense.id)).note, "продукты")
+
+    async def test_edit_rejects_nonsense(self):
+        self.assertIn("Формат", await self.send("/edit"))
+        self.assertIn("Не понял", await self.send("/edit 1 абв"))
+        self.assertIn("Такой траты нет", await self.send("/edit 999 500"))
+
     # ------------------------------------------------------------------- ИИ
 
     async def send_voice(self) -> str:
@@ -441,7 +559,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.dp["ai"] = ai
 
         answer = await self.send_voice()
-        self.assertEqual(ai.audio_calls, [b"OggS-fake-voice"])
+        self.assertEqual(ai.audio_calls, [self.bot.file_payload])
         self.assertIn("Услышал", answer)
         self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 30000)
 

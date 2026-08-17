@@ -8,8 +8,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from .. import charts, export
-from ..db import Database, UserSettings
+from .. import charts, export, transfer
+from ..db import TOTAL_LIMIT_CATEGORY, Database, UserSettings
 from ..formatting import format_money, month_title, records_word
 from ..keyboards import export_kinds
 from ..services import month_end, month_start, trend_line
@@ -36,7 +36,9 @@ async def cmd_export(
         "📤 <b>Что выгрузить?</b>\n\n"
         f"<b>PDF</b> — отчёт за {month_title(today)}: сводка, график по категориям, "
         "динамика по дням и таблица трат.\n"
-        "<b>CSV</b> — все траты с самого начала, таблицей для Excel.",
+        "<b>CSV</b> — все траты с самого начала, таблицей для Excel.\n"
+        "<b>JSON</b> — то же плюс категории и лимиты: отдать ИИ на проверку, "
+        "а правки залить обратно через /import.",
         reply_markup=export_kinds(),
     )
 
@@ -57,6 +59,42 @@ async def cb_csv(callback: CallbackQuery, db: Database, user: UserSettings) -> N
         await callback.message.answer_document(
             BufferedInputFile(payload, filename=filename),
             caption=f"Выгрузил {len(expenses)} {records_word(len(expenses))}.",
+        )
+
+
+@router.callback_query(F.data == "exp:json")
+async def cb_json(
+    callback: CallbackQuery, db: Database, user: UserSettings, today: dt.date
+) -> None:
+    first = await db.first_expense_date(user.user_id)
+    if first is None:
+        await callback.answer("Трат пока нет", show_alert=True)
+        return
+
+    expenses = await db.expenses_between(user.user_id, first, dt.date(2999, 12, 31))
+    categories = await db.list_categories(user.user_id)
+    by_id = {category.id: category.name for category in categories}
+    limits = [
+        ("Всего за месяц" if category_id == TOTAL_LIMIT_CATEGORY else by_id.get(category_id, "?"),
+         amount)
+        for category_id, amount in await db.list_limits(user.user_id)
+    ]
+
+    payload = transfer.dump(
+        expenses, categories, limits, user.currency, user.tz, today
+    )
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer_document(
+            BufferedInputFile(payload, filename=f"expenses-{today.isoformat()}.json"),
+            caption=(
+                f"🤖 {len(expenses)} {records_word(len(expenses))} со всем контекстом: "
+                "категории, ключевые слова, лимиты.\n\n"
+                "Отправь файл любому ИИ и попроси проверить суммы, даты и категории. "
+                "Правленый файл пришли мне обратно — покажу, что изменится, и применю "
+                "после подтверждения. Подробнее — /import"
+            ),
         )
 
 
