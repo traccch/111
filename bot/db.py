@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 #: category_id, под которым хранится общий (не привязанный к категории) лимит
 TOTAL_LIMIT_CATEGORY = 0
@@ -72,10 +76,27 @@ CREATE TABLE IF NOT EXISTS snoozes (
 );
 """
 
-#: Колонки, добавленные после первого релиза: у кого база уже есть, дольём их.
-MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("users", "skip_if_logged", "INTEGER NOT NULL DEFAULT 1"),
-)
+_CREATE_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", re.DOTALL)
+#: Строки описания таблицы, которые не являются колонками.
+_NOT_A_COLUMN = frozenset({"PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"})
+
+
+def expected_columns(schema: str) -> dict[str, list[tuple[str, str]]]:
+    """Разбирает SCHEMA в {таблица: [(колонка, описание), …]}."""
+    tables: dict[str, list[tuple[str, str]]] = {}
+    for table, body in _CREATE_TABLE.findall(schema):
+        columns: list[tuple[str, str]] = []
+        for line in body.splitlines():
+            line = line.strip().rstrip(",").strip()
+            if not line or line.startswith("--"):
+                continue
+            # «UNIQUE(user_id, at)» пишут и без пробела перед скобкой
+            if line.split()[0].split("(")[0].upper() in _NOT_A_COLUMN:
+                continue
+            column, _, definition = line.partition(" ")
+            columns.append((column, definition.strip()))
+        tables[table] = columns
+    return tables
 
 #: (эмодзи, название, ключевые слова)
 DEFAULT_CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -258,14 +279,32 @@ class Database:
         await self._conn.commit()
 
     async def _migrate(self) -> None:
-        """Дополняет старые базы колонками, появившимися позже."""
-        for table, column, definition in MIGRATIONS:
+        """Дополняет уже существующую базу колонками, появившимися в SCHEMA позже.
+
+        Новые таблицы создаёт сам `CREATE TABLE IF NOT EXISTS`, а вот колонка,
+        добавленная в описание существующей таблицы, до старой базы не доедет —
+        и бот падает с «no such column» на истории трат, которую жалко потерять.
+        Список ожидаемых колонок берётся из самой SCHEMA, поэтому за ним не надо
+        следить руками.
+        """
+        for table, columns in expected_columns(SCHEMA).items():
             cur = await self.conn.execute(f"PRAGMA table_info({table})")
-            columns = {row["name"] for row in await cur.fetchall()}
-            if column not in columns:
-                await self.conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                )
+            existing = {row["name"] for row in await cur.fetchall()}
+            if not existing:
+                continue  # таблицы не было — её только что создал executescript
+
+            for column, definition in columns:
+                if column in existing:
+                    continue
+                try:
+                    await self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                    )
+                except aiosqlite.OperationalError as exc:
+                    # SQLite не умеет добавлять колонку с неконстантным DEFAULT
+                    logger.warning("Не смог добавить %s.%s: %s", table, column, exc)
+                else:
+                    logger.info("Добавил колонку %s.%s", table, column)
 
     async def close(self) -> None:
         if self._conn is not None:

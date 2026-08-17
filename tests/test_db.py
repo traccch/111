@@ -9,7 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from bot.db import TOTAL_LIMIT_CATEGORY, Database
+from bot.db import SCHEMA, TOTAL_LIMIT_CATEGORY, Database, expected_columns
 from bot.formatting import sparkline
 from bot.services import (
     build_report,
@@ -245,6 +245,27 @@ class SparklineTest(unittest.TestCase):
 
 class MigrationTest(unittest.IsolatedAsyncioTestCase):
     """База, созданная до появления напоминаний, должна открываться и дополняться."""
+
+    def test_schema_is_parsed_into_columns(self):
+        tables = expected_columns(SCHEMA)
+        self.assertEqual(
+            [name for name, _ in tables["users"]],
+            ["user_id", "currency", "tz", "skip_if_logged", "created_at"],
+        )
+        # ограничения таблицы за колонки не считаются
+        self.assertNotIn("UNIQUE", [name.upper() for name, _ in tables["reminders"]])
+        self.assertNotIn("PRIMARY", [name.upper() for name, _ in tables["limits"]])
+
+    async def test_migration_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "repeat.db")
+            for _ in range(2):
+                db = Database(path, "Europe/Moscow", "₽")
+                await db.connect()
+                try:
+                    self.assertEqual((await db.ensure_user(777)).user_id, 777)
+                finally:
+                    await db.close()
 
     async def test_old_database_gets_new_column(self):
         with tempfile.TemporaryDirectory() as tmp:
