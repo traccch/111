@@ -2,7 +2,7 @@
 
 from aiogram import Router
 
-from . import budget, categories, common, expenses, reports
+from . import budget, categories, common, expenses, reminders, reports
 
 
 def build_router() -> Router:
@@ -10,6 +10,7 @@ def build_router() -> Router:
     router.include_router(common.router)
     router.include_router(categories.router)
     router.include_router(budget.router)
+    router.include_router(reminders.router)
     router.include_router(reports.router)
     router.include_router(expenses.router)
     return router

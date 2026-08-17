@@ -7,7 +7,7 @@ from typing import Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from .db import Category, Expense
+from .db import Category, Expense, Reminder
 
 PERIODS: tuple[tuple[str, str], ...] = (
     ("day", "Сегодня"),
@@ -45,6 +45,33 @@ def report_periods(active: str) -> InlineKeyboardMarkup:
         mark = "· " if key == active else ""
         builder.button(text=f"{mark}{title}", callback_data=f"rep:{key}")
     builder.adjust(4)
+    return builder.as_markup()
+
+
+def reminder_actions() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏰ Через 15 минут", callback_data="snooze"),
+                InlineKeyboardButton(text="📊 Сводка", callback_data="rep:month"),
+            ]
+        ]
+    )
+
+
+def reminders_settings(
+    reminders: Sequence[Reminder], skip_if_logged: bool
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for reminder in reminders:
+        builder.button(text=f"🗑 {reminder.title}", callback_data=f"delrem:{reminder.title}")
+    builder.adjust(3)
+    mark = "✅" if skip_if_logged else "⬜️"
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{mark} Молчать, если траты уже записаны", callback_data="togskip"
+        )
+    )
     return builder.as_markup()
 
 

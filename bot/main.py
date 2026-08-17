@@ -15,6 +15,7 @@ from .config import load_config
 from .db import Database
 from .handlers import build_router
 from .middlewares import UserMiddleware
+from .reminders import ReminderScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ COMMANDS = [
     BotCommand(command="undo", description="Удалить последнюю трату"),
     BotCommand(command="limit", description="Лимит на месяц"),
     BotCommand(command="limits", description="Список лимитов"),
+    BotCommand(command="remind", description="Напоминать записывать траты"),
     BotCommand(command="cats", description="Категории"),
     BotCommand(command="export", description="Выгрузка в CSV"),
     BotCommand(command="help", description="Как пользоваться"),
@@ -52,6 +54,8 @@ async def run() -> None:
     dispatcher.callback_query.middleware(middleware)
     dispatcher.include_router(build_router())
 
+    scheduler = ReminderScheduler(bot, db)
+
     try:
         try:
             me = await bot.get_me()
@@ -73,10 +77,12 @@ async def run() -> None:
 
         await bot.set_my_commands(COMMANDS)
         await bot.delete_webhook(drop_pending_updates=True)
+        scheduler.start()
         logger.info("Бот @%s запущен. Открой его в Telegram и напиши /start", me.username)
         print(f"\n✓ Бот работает: https://t.me/{me.username}\n")
         await dispatcher.start_polling(bot)
     finally:
+        await scheduler.stop()
         await db.close()
         await bot.session.close()
 

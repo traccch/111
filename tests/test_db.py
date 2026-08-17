@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import aiosqlite
+
 from bot.db import TOTAL_LIMIT_CATEGORY, Database
 from bot.services import build_report, check_limits, month_end, month_start, period_range
 
@@ -130,6 +132,39 @@ class DatabaseTest(unittest.IsolatedAsyncioTestCase):
 
         for period in ("day", "week", "month", "all"):
             self.assertTrue(await build_report(self.db, self.user, period, TODAY))
+
+
+class MigrationTest(unittest.IsolatedAsyncioTestCase):
+    """База, созданная до появления напоминаний, должна открываться и дополняться."""
+
+    async def test_old_database_gets_new_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "old.db")
+
+            legacy = await aiosqlite.connect(path)
+            await legacy.executescript(
+                """
+                CREATE TABLE users (
+                    user_id    INTEGER PRIMARY KEY,
+                    currency   TEXT NOT NULL DEFAULT '₽',
+                    tz         TEXT NOT NULL DEFAULT 'Europe/Moscow',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO users (user_id, currency, tz) VALUES (777, '$', 'Asia/Almaty');
+                """
+            )
+            await legacy.commit()
+            await legacy.close()
+
+            db = Database(path, "Europe/Moscow", "₽")
+            await db.connect()
+            try:
+                user = await db.ensure_user(777)
+                self.assertEqual((user.currency, user.tz), ("$", "Asia/Almaty"))
+                self.assertTrue(user.skip_if_logged)
+                self.assertIsNotNone(await db.add_reminder(777, dt.time(21, 0)))
+            finally:
+                await db.close()
 
 
 class PeriodTest(unittest.TestCase):

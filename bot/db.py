@@ -18,10 +18,11 @@ TOTAL_LIMIT_CATEGORY = 0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    user_id    INTEGER PRIMARY KEY,
-    currency   TEXT NOT NULL DEFAULT '₽',
-    tz         TEXT NOT NULL DEFAULT 'Europe/Moscow',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    user_id        INTEGER PRIMARY KEY,
+    currency       TEXT NOT NULL DEFAULT '₽',
+    tz             TEXT NOT NULL DEFAULT 'Europe/Moscow',
+    skip_if_logged INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -52,7 +53,29 @@ CREATE TABLE IF NOT EXISTS limits (
     amount      INTEGER NOT NULL,
     PRIMARY KEY (user_id, category_id)
 );
+
+-- Ежедневные напоминания записать траты. Время — местное, владельца.
+CREATE TABLE IF NOT EXISTS reminders (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    at            TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_fired_on TEXT,
+    UNIQUE(user_id, at)
+);
+
+-- Отложенные кнопкой «через 15 минут». Время — UTC.
+CREATE TABLE IF NOT EXISTS snoozes (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    fire_at TEXT NOT NULL
+);
 """
+
+#: Колонки, добавленные после первого релиза: у кого база уже есть, дольём их.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("users", "skip_if_logged", "INTEGER NOT NULL DEFAULT 1"),
+)
 
 #: (эмодзи, название, ключевые слова)
 DEFAULT_CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -84,6 +107,31 @@ class UserSettings:
     user_id: int
     currency: str
     tz: str
+    skip_if_logged: bool = True
+
+
+@dataclass(frozen=True)
+class Reminder:
+    id: int
+    at: dt.time
+    enabled: bool
+    last_fired_on: Optional[dt.date]
+
+    @property
+    def title(self) -> str:
+        return self.at.strftime("%H:%M")
+
+
+@dataclass(frozen=True)
+class DueReminder:
+    """Включённое напоминание вместе с настройками владельца."""
+
+    reminder_id: int
+    user_id: int
+    tz: str
+    at: dt.time
+    last_fired_on: Optional[dt.date]
+    skip_if_logged: bool
 
 
 @dataclass(frozen=True)
@@ -150,6 +198,20 @@ def _row_to_category(row: aiosqlite.Row) -> Category:
     )
 
 
+def _row_to_reminder(row: aiosqlite.Row) -> Reminder:
+    fired = row["last_fired_on"]
+    return Reminder(
+        id=row["id"],
+        at=dt.time.fromisoformat(row["at"]),
+        enabled=bool(row["enabled"]),
+        last_fired_on=dt.date.fromisoformat(fired) if fired else None,
+    )
+
+
+def _format_stamp(moment: dt.datetime) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _row_to_expense(row: aiosqlite.Row) -> Expense:
     return Expense(
         id=row["id"],
@@ -192,7 +254,18 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Дополняет старые базы колонками, появившимися позже."""
+        for table, column, definition in MIGRATIONS:
+            cur = await self.conn.execute(f"PRAGMA table_info({table})")
+            columns = {row["name"] for row in await cur.fetchall()}
+            if column not in columns:
+                await self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -204,11 +277,14 @@ class Database:
     async def ensure_user(self, user_id: int) -> UserSettings:
         """Создаёт пользователя с набором категорий по умолчанию (идемпотентно)."""
         cur = await self.conn.execute(
-            "SELECT user_id, currency, tz FROM users WHERE user_id = ?", (user_id,)
+            "SELECT user_id, currency, tz, skip_if_logged FROM users WHERE user_id = ?",
+            (user_id,),
         )
         row = await cur.fetchone()
         if row is not None:
-            return UserSettings(row["user_id"], row["currency"], row["tz"])
+            return UserSettings(
+                row["user_id"], row["currency"], row["tz"], bool(row["skip_if_logged"])
+            )
 
         await self.conn.execute(
             "INSERT INTO users (user_id, currency, tz) VALUES (?, ?, ?)",
@@ -233,6 +309,12 @@ class Database:
 
     async def set_tz(self, user_id: int, tz: str) -> None:
         await self.conn.execute("UPDATE users SET tz = ? WHERE user_id = ?", (tz, user_id))
+        await self.conn.commit()
+
+    async def set_skip_if_logged(self, user_id: int, value: bool) -> None:
+        await self.conn.execute(
+            "UPDATE users SET skip_if_logged = ? WHERE user_id = ?", (int(value), user_id)
+        )
         await self.conn.commit()
 
     # ------------------------------------------------------------- categories
@@ -472,6 +554,103 @@ class Database:
         )
         row = await cur.fetchone()
         return row["amount"] if row else None
+
+    # ------------------------------------------------------------ напоминания
+
+    async def list_reminders(self, user_id: int) -> list[Reminder]:
+        cur = await self.conn.execute(
+            "SELECT id, at, enabled, last_fired_on FROM reminders"
+            " WHERE user_id = ? ORDER BY at",
+            (user_id,),
+        )
+        return [_row_to_reminder(row) for row in await cur.fetchall()]
+
+    async def add_reminder(self, user_id: int, at: dt.time) -> Optional[Reminder]:
+        """Добавляет напоминание. None, если на это время оно уже есть."""
+        try:
+            await self.conn.execute(
+                "INSERT INTO reminders (user_id, at) VALUES (?, ?)",
+                (user_id, at.strftime("%H:%M")),
+            )
+        except aiosqlite.IntegrityError:
+            return None
+        await self.conn.commit()
+        for reminder in await self.list_reminders(user_id):
+            if reminder.at == at:
+                return reminder
+        return None
+
+    async def delete_reminder(self, user_id: int, at: dt.time) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM reminders WHERE user_id = ? AND at = ?",
+            (user_id, at.strftime("%H:%M")),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def delete_all_reminders(self, user_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
+        await self.conn.commit()
+        return cur.rowcount
+
+    async def mark_reminder_fired(self, reminder_id: int, on: dt.date) -> None:
+        await self.conn.execute(
+            "UPDATE reminders SET last_fired_on = ? WHERE id = ?",
+            (on.isoformat(), reminder_id),
+        )
+        await self.conn.commit()
+
+    async def due_candidates(self) -> list[DueReminder]:
+        cur = await self.conn.execute(
+            "SELECT r.id, r.user_id, r.at, r.last_fired_on, u.tz, u.skip_if_logged"
+            " FROM reminders r JOIN users u ON u.user_id = r.user_id"
+            " WHERE r.enabled = 1"
+        )
+        result: list[DueReminder] = []
+        for row in await cur.fetchall():
+            fired = row["last_fired_on"]
+            result.append(
+                DueReminder(
+                    reminder_id=row["id"],
+                    user_id=row["user_id"],
+                    tz=row["tz"],
+                    at=dt.time.fromisoformat(row["at"]),
+                    last_fired_on=dt.date.fromisoformat(fired) if fired else None,
+                    skip_if_logged=bool(row["skip_if_logged"]),
+                )
+            )
+        return result
+
+    async def has_expense_since(self, user_id: int, since_utc: dt.datetime) -> bool:
+        """Записывал ли пользователь трату после указанного момента (UTC)."""
+        cur = await self.conn.execute(
+            "SELECT 1 FROM expenses WHERE user_id = ? AND created_at >= ? LIMIT 1",
+            (user_id, _format_stamp(since_utc)),
+        )
+        return await cur.fetchone() is not None
+
+    # ------------------------------------------------------- отложенные (snooze)
+
+    async def add_snooze(self, user_id: int, fire_at_utc: dt.datetime) -> None:
+        await self.conn.execute(
+            "INSERT INTO snoozes (user_id, fire_at) VALUES (?, ?)",
+            (user_id, _format_stamp(fire_at_utc)),
+        )
+        await self.conn.commit()
+
+    async def pop_due_snoozes(self, now_utc: dt.datetime) -> list[int]:
+        """Возвращает user_id, которым пора напомнить, и удаляет эти записи."""
+        cur = await self.conn.execute(
+            "SELECT id, user_id FROM snoozes WHERE fire_at <= ?", (_format_stamp(now_utc),)
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            return []
+        await self.conn.executemany(
+            "DELETE FROM snoozes WHERE id = ?", [(row["id"],) for row in rows]
+        )
+        await self.conn.commit()
+        return [row["user_id"] for row in rows]
 
     async def list_limits(self, user_id: int) -> list[tuple[int, int]]:
         """Возвращает [(category_id, amount)], где 0 — общий лимит."""

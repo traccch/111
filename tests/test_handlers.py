@@ -192,6 +192,29 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Удалил", await self.send("/delcat Пицца"))
         self.assertEqual((await self.db.last_expenses(USER_ID))[0].category_name, "Прочее")
 
+    async def test_reminder_commands(self):
+        self.assertIn("21:00", await self.send("/remind 21:00"))
+        self.assertIn("21:00", await self.send("/reminders"))
+        self.assertEqual(len(await self.db.list_reminders(USER_ID)), 1)
+
+        self.assertIn("Не понял время", await self.send("/remind вечером"))
+        await self.send("/remind 9:00")
+        self.assertEqual(len(await self.db.list_reminders(USER_ID)), 2)
+
+        await self.click("delrem:09:00")
+        self.assertEqual(len(await self.db.list_reminders(USER_ID)), 1)
+
+        await self.click("togskip")
+        self.assertFalse((await self.db.ensure_user(USER_ID)).skip_if_logged)
+
+        self.assertIn("Выключил", await self.send("/remind off"))
+        self.assertEqual(await self.db.list_reminders(USER_ID), [])
+
+    async def test_snooze_button(self):
+        await self.click("snooze")
+        soon = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(minutes=20)
+        self.assertEqual(await self.db.pop_due_snoozes(soon), [USER_ID])
+
     async def test_export_sends_csv(self):
         await self.send("кофе 300")
         await self.send("/export")
