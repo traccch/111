@@ -58,7 +58,6 @@ def _style(ax, currency: str, horizontal: bool = False) -> None:
     """Общий вид: тонкие волосяные линии, ненавязчивая сетка, без рамки."""
     from matplotlib.ticker import FuncFormatter
 
-    ax.set_facecolor(COLOR_SURFACE)
     for side in ("top", "right", "left" if not horizontal else "bottom"):
         ax.spines[side].set_visible(False)
     for side in ("bottom", "left"):
@@ -109,12 +108,9 @@ def _average_note(average: float, currency: str, unit: str) -> str:
     return f"пунктир — среднее {format_money(round(average) * 100, currency)} {unit}"
 
 
-def daily_chart(
-    days: Sequence[dt.date], amounts: Sequence[int], currency: str, title: str
-) -> bytes:
-    plt = _pyplot()
-    fig, ax = plt.subplots(figsize=FIGSIZE, facecolor=COLOR_SURFACE)
-
+def _draw_daily(
+    ax, days: Sequence[dt.date], amounts: Sequence[int], currency: str
+) -> float:
     values = [_major(amount) for amount in amounts]
     # ширина < 1 оставляет зазор между столбцами — соседние заливки не слипаются
     ax.bar(range(len(days)), values, width=0.72, color=COLOR_SERIES, zorder=2)
@@ -126,16 +122,21 @@ def daily_chart(
     ax.set_xlim(-0.8, len(days) - 0.2)
 
     _style(ax, currency)
-    average = _average_line(ax, values)
+    return _average_line(ax, values)
+
+
+def daily_chart(
+    days: Sequence[dt.date], amounts: Sequence[int], currency: str, title: str
+) -> bytes:
+    plt = _pyplot()
+    fig, ax = plt.subplots(figsize=FIGSIZE, facecolor=COLOR_SURFACE)
+    ax.set_facecolor(COLOR_SURFACE)
+    average = _draw_daily(ax, days, amounts, currency)
     return _finish(plt, fig, title, _average_note(average, currency, "в день"))
 
 
-def category_chart(items: Sequence[tuple[str, int]], currency: str, title: str) -> bytes:
+def _draw_categories(ax, items: Sequence[tuple[str, int]], currency: str) -> None:
     """Горизонтальные полосы: длинные названия категорий читаются, а не встают боком."""
-    plt = _pyplot()
-    height = max(3.0, 0.52 * len(items) + 1.6)
-    fig, ax = plt.subplots(figsize=(FIGSIZE[0], height), facecolor=COLOR_SURFACE)
-
     names = [name for name, _ in items][::-1]
     values = [_major(amount) for _, amount in items][::-1]
 
@@ -157,12 +158,21 @@ def category_chart(items: Sequence[tuple[str, int]], currency: str, title: str) 
     ax.grid(visible=False)
     ax.set_xticks([])
     ax.spines["bottom"].set_visible(False)
+
+
+def category_chart(items: Sequence[tuple[str, int]], currency: str, title: str) -> bytes:
+    plt = _pyplot()
+    height = max(3.0, 0.52 * len(items) + 1.6)
+    fig, ax = plt.subplots(figsize=(FIGSIZE[0], height), facecolor=COLOR_SURFACE)
+    ax.set_facecolor(COLOR_SURFACE)
+    _draw_categories(ax, items, currency)
     return _finish(plt, fig, title)
 
 
 def monthly_chart(items: Sequence[tuple[str, int]], currency: str, title: str) -> bytes:
     plt = _pyplot()
     fig, ax = plt.subplots(figsize=FIGSIZE, facecolor=COLOR_SURFACE)
+    ax.set_facecolor(COLOR_SURFACE)
 
     labels = []
     for month, _ in items:
@@ -183,3 +193,97 @@ def month_name(month: str) -> str:
     """'2026-08' → 'август 2026'."""
     year, number = month.split("-")
     return f"{MONTHS_NOMINATIVE[int(number) - 1]} {year}"
+
+
+# --------------------------------------------------------------------- PDF
+
+#: Строк таблицы на страницу A4 выбранным кеглем.
+TABLE_ROWS_PER_PAGE = 42
+#: Сколько строк влезает под график на второй странице.
+ROWS_UNDER_CHART = 22
+A4 = (8.27, 11.69)
+
+
+def _page(plt, title: str, subtitle: str = ""):
+    page = plt.figure(figsize=A4, dpi=150, facecolor="white")
+    page.text(0.07, 0.955, title, fontsize=16, fontweight="bold", va="top")
+    if subtitle:
+        page.text(0.07, 0.928, subtitle, fontsize=9, color=COLOR_MUTED, va="top")
+    return page
+
+
+def expense_pdf(
+    title: str,
+    subtitle: str,
+    summary_lines: Sequence[str],
+    categories: Sequence[tuple[str, int]],
+    days: Sequence[dt.date],
+    amounts: Sequence[int],
+    table: Sequence[str],
+    currency: str,
+) -> bytes:
+    """Отчёт A4: сводка с графиком по категориям, динамика по дням и таблица трат."""
+    plt = _pyplot()
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    buffer = io.BytesIO()
+    with PdfPages(buffer) as pdf:
+        page = _page(plt, title, subtitle)
+        page.text(
+            0.07, 0.90, "\n".join(summary_lines),
+            fontsize=9, family="DejaVu Sans Mono", va="top", linespacing=1.5,
+        )
+        if categories:
+            # график начинается там, где закончился текст: строк бывает от 6 до 20
+            top = min(0.72, max(0.40, 0.88 - len(summary_lines) * 0.019))
+            axes = page.add_axes((0.30, 0.09, 0.62, top - 0.09))
+            axes.set_facecolor("white")
+            _draw_categories(axes, categories, currency)
+            page.text(
+                0.07, top + 0.02, "По категориям",
+                fontsize=11, fontweight="bold", va="bottom",
+            )
+        pdf.savefig(page)
+        plt.close(page)
+
+        rows = list(table)
+        header, rest = rows[:2], rows[2:]
+        done = 0
+
+        # Страница с графиком по дням: под ним ещё остаётся место на часть таблицы,
+        # иначе две трети листа ушли бы в пустоту.
+        if len([amount for amount in amounts if amount]) >= 2:
+            page = _page(plt, "Расходы по дням", subtitle)
+            axes = page.add_axes((0.10, 0.60, 0.83, 0.28))
+            axes.set_facecolor("white")
+            average = _draw_daily(axes, days, amounts, currency)
+            note = _average_note(average, currency, "в день")
+            if note:
+                page.text(0.07, 0.915, note, fontsize=9, color=COLOR_MUTED, va="top")
+
+            chunk = rest[:ROWS_UNDER_CHART]
+            if chunk:
+                page.text(
+                    0.06, 0.53, f"Траты (1–{len(chunk)} из {len(rest)})",
+                    fontsize=11, fontweight="bold", va="top",
+                )
+                page.text(
+                    0.06, 0.495, "\n".join(header + chunk),
+                    fontsize=7.5, family="DejaVu Sans Mono", va="top", linespacing=1.6,
+                )
+                done = len(chunk)
+            pdf.savefig(page)
+            plt.close(page)
+
+        while done < len(rest):
+            chunk = rest[done : done + TABLE_ROWS_PER_PAGE]
+            page = _page(plt, f"Траты ({done + 1}–{done + len(chunk)} из {len(rest)})")
+            page.text(
+                0.06, 0.915, "\n".join(header + chunk),
+                fontsize=7.5, family="DejaVu Sans Mono", va="top", linespacing=1.6,
+            )
+            pdf.savefig(page)
+            plt.close(page)
+            done += len(chunk)
+
+    return buffer.getvalue()

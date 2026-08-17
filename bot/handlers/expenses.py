@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import csv
 import datetime as dt
-import io
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 
 from ..db import Database, Expense, UserSettings
 from ..formatting import esc, format_date, format_money, records_word
@@ -77,37 +75,6 @@ async def cmd_last(
             f"{esc(expense.category_title)}{note}"
         )
     await message.answer("\n".join(lines), reply_markup=delete_buttons(expenses))
-
-
-@router.message(Command("export"))
-async def cmd_export(message: Message, db: Database, user: UserSettings) -> None:
-    first = await db.first_expense_date(user.user_id)
-    if first is None:
-        await message.answer("Экспортировать нечего — трат пока нет.")
-        return
-
-    expenses = await db.expenses_between(user.user_id, first, dt.date(2999, 12, 31))
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, delimiter=";")
-    writer.writerow(["id", "date", "amount", "currency", "category", "note"])
-    for expense in expenses:
-        writer.writerow(
-            [
-                expense.id,
-                expense.spent_on.isoformat(),
-                f"{expense.amount / 100:.2f}".replace(".", ","),
-                user.currency,
-                expense.category_name,
-                expense.note,
-            ]
-        )
-
-    payload = buffer.getvalue().encode("utf-8-sig")  # BOM, чтобы Excel не ломал кириллицу
-    filename = f"expenses-{dt.date.today().isoformat()}.csv"
-    await message.answer_document(
-        BufferedInputFile(payload, filename=filename),
-        caption=f"Выгрузил {len(expenses)} {records_word(len(expenses))}.",
-    )
 
 
 @router.message(F.text, ~F.text.startswith("/"))

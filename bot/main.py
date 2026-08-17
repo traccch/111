@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from .config import load_config
@@ -20,6 +21,7 @@ from .reminders import ReminderScheduler
 logger = logging.getLogger(__name__)
 
 COMMANDS = [
+    BotCommand(command="add", description="Записать трату по шагам"),
     BotCommand(command="stats", description="Сводка расходов"),
     BotCommand(command="chart", description="Графики"),
     BotCommand(command="last", description="Последние траты"),
@@ -47,7 +49,7 @@ async def run() -> None:
         token=config.token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dispatcher = Dispatcher()
+    dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher["db"] = db
 
     middleware = UserMiddleware()

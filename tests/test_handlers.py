@@ -15,6 +15,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import (
     EditMessageMedia,
     SendDocument,
@@ -100,6 +101,9 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
 
         self.dp = get_dispatcher()
         self.dp["db"] = self.db
+        # диспетчер общий на весь прогон, поэтому состояние FSM из прошлого
+        # теста иначе утекло бы в следующий
+        self.dp.fsm.storage = MemoryStorage()
 
         self.bot = RecordingBot()
         self._update_id = 0
@@ -199,6 +203,46 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Удалил", await self.send("/delcat Пицца"))
         self.assertEqual((await self.db.last_expenses(USER_ID))[0].category_name, "Прочее")
 
+    async def test_add_step_by_step(self):
+        self.assertIn("Шаг 1", await self.send("/add"))
+        self.assertIn("Не понял сумму", await self.send("абвгд"))
+
+        self.assertIn("Шаг 2", await self.send("450"))
+        cafe = await self.db.find_category_by_name(USER_ID, "Кафе")
+        await self.click(f"add:cat:{cafe.id}")
+
+        answer = await self.send("обед с коллегами")
+        self.assertIn("450", answer)
+
+        expense = (await self.db.last_expenses(USER_ID))[0]
+        self.assertEqual(expense.amount, 45000)
+        self.assertEqual(expense.category_name, "Кафе")
+        self.assertEqual(expense.note, "обед с коллегами")
+
+        # после записи состояние сброшено: обычный текст снова разбирается сам
+        await self.send("кофе 300")
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].note, "кофе")
+
+    async def test_add_skip_note_and_cancel(self):
+        await self.send("/add")
+        await self.send("1 250,50")
+        products = await self.db.find_category_by_name(USER_ID, "Продукты")
+        await self.click(f"add:cat:{products.id}")
+        await self.click("add:skip")
+
+        expense = (await self.db.last_expenses(USER_ID))[0]
+        self.assertEqual(expense.amount, 125050)
+        self.assertEqual(expense.note, "")
+
+        await self.send("/add")
+        self.assertIn("Отменил", await self.send("/cancel"))
+        self.assertIn("Нечего отменять", await self.send("/cancel"))
+        self.assertEqual(len(await self.db.last_expenses(USER_ID)), 1)
+
+    async def test_command_during_add_is_not_swallowed(self):
+        await self.send("/add")
+        self.assertIn("Расходы", await self.send("/stats"))
+
     async def test_reminder_commands(self):
         self.assertIn("21:00", await self.send("/remind 21:00"))
         self.assertIn("21:00", await self.send("/reminders"))
@@ -222,14 +266,30 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         soon = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(minutes=20)
         self.assertEqual(await self.db.pop_due_snoozes(soon), [USER_ID])
 
-    async def test_export_sends_csv(self):
+    async def test_export_csv(self):
+        self.assertIn("Выгружать нечего", await self.send("/export"))
+
         await self.send("кофе 300")
-        await self.send("/export")
+        self.assertIn("Что выгрузить", await self.send("/export"))
+        await self.click("exp:csv")
+
         documents = [call for call in self.bot.calls if isinstance(call, SendDocument)]
         self.assertEqual(len(documents), 1)
         payload = documents[0].document.data.decode("utf-8-sig")
         self.assertIn("кофе", payload)
         self.assertIn("300,00", payload)
+
+    @unittest.skipUnless(charts.available(), "matplotlib не установлен")
+    async def test_export_pdf(self):
+        await self.send("кофе 300")
+        await self.send("аренда 45000")
+        await self.send("/export")
+        await self.click("exp:pdf")
+
+        documents = [call for call in self.bot.calls if isinstance(call, SendDocument)]
+        self.assertEqual(len(documents), 1)
+        self.assertTrue(documents[0].document.data.startswith(b"%PDF"))
+        self.assertTrue(documents[0].document.filename.endswith(".pdf"))
 
     @unittest.skipUnless(charts.available(), "matplotlib не установлен")
     async def test_chart_command(self):

@@ -64,6 +64,45 @@ def chart_kinds(active: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def cancel_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✖️ Отмена", callback_data="add:cancel")]
+        ]
+    )
+
+
+def add_categories(categories: Sequence[Category]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for category in categories:
+        builder.button(text=category.title, callback_data=f"add:cat:{category.id}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="✖️ Отмена", callback_data="add:cancel"))
+    return builder.as_markup()
+
+
+def skip_note() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Без комментария", callback_data="add:skip"),
+                InlineKeyboardButton(text="✖️ Отмена", callback_data="add:cancel"),
+            ]
+        ]
+    )
+
+
+def export_kinds() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📄 PDF за месяц", callback_data="exp:pdf"),
+                InlineKeyboardButton(text="📊 CSV со всем", callback_data="exp:csv"),
+            ]
+        ]
+    )
+
+
 def reminder_actions() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
