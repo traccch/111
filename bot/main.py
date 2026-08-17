@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 COMMANDS = [
     BotCommand(command="stats", description="Сводка расходов"),
+    BotCommand(command="chart", description="Графики"),
     BotCommand(command="last", description="Последние траты"),
     BotCommand(command="undo", description="Удалить последнюю трату"),
     BotCommand(command="limit", description="Лимит на месяц"),

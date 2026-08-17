@@ -48,6 +48,22 @@ def report_periods(active: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+CHART_KINDS: tuple[tuple[str, str], ...] = (
+    ("days", "По дням"),
+    ("cats", "Категории"),
+    ("months", "Месяцы"),
+)
+
+
+def chart_kinds(active: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for key, title in CHART_KINDS:
+        mark = "· " if key == active else ""
+        builder.button(text=f"{mark}{title}", callback_data=f"chart:{key}")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
 def reminder_actions() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

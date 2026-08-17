@@ -22,6 +22,8 @@ MONTHS_NOMINATIVE = (
 
 WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
+SPARKS = "▁▂▃▄▅▆▇█"
+
 
 def format_money(minor: int, currency: str = "₽") -> str:
     """125050 → «1 250,50 ₽», 30000 → «300 ₽»."""
@@ -70,6 +72,22 @@ def bar(value: int, maximum: int, width: int = 10) -> str:
         return "░" * width
     filled = max(1, min(width, round(value / maximum * width)))
     return "█" * filled + "░" * (width - filled)
+
+
+def sparkline(values: Sequence[float]) -> str:
+    """Мини-график из блочных символов: ▁▂▅▇▃."""
+    numbers = [float(value) for value in values]
+    if not numbers:
+        return ""
+    low, high = min(numbers), max(numbers)
+    if high - low < 1e-9:
+        return SPARKS[len(SPARKS) // 2] * len(numbers)
+    step = (high - low) / (len(SPARKS) - 1)
+    return "".join(SPARKS[int(round((value - low) / step))] for value in numbers)
+
+
+def days_word(count: int) -> str:
+    return plural(count, "день", "дня", "дней")
 
 
 def esc(text: str) -> str:

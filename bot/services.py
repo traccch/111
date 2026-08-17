@@ -7,6 +7,8 @@ from typing import Optional
 
 from .db import TOTAL_LIMIT_CATEGORY, Database, UserSettings
 from .formatting import (
+    MONTHS_GENITIVE,
+    days_word,
     esc,
     format_date,
     format_money,
@@ -14,7 +16,11 @@ from .formatting import (
     month_title,
     records_word,
     render_breakdown,
+    sparkline,
 )
+
+#: Сколько последних дней показываем спарклайном, чтобы строка не расползалась.
+SPARK_DAYS = 30
 
 
 def month_start(date: dt.date) -> dt.date:
@@ -39,6 +45,76 @@ def period_range(period: str, today: dt.date) -> tuple[dt.date, dt.date, str]:
     return month_start(today), today, f"за {month_title(today)}"
 
 
+def previous_range(
+    period: str, start: dt.date, end: dt.date
+) -> Optional[tuple[dt.date, dt.date, str]]:
+    """Тот же по длине отрезок периодом раньше — и как его назвать в тексте."""
+    if period == "day":
+        day = start - dt.timedelta(days=1)
+        return day, day, "вчера"
+    if period == "week":
+        return start - dt.timedelta(days=7), end - dt.timedelta(days=7), "неделей раньше"
+    if period == "month":
+        prev_start = month_start(start - dt.timedelta(days=1))
+        length = (end - start).days
+        prev_end = min(prev_start + dt.timedelta(days=length), month_end(prev_start))
+        label = f"за те же дни в {MONTHS_GENITIVE[prev_start.month - 1]}"
+        return prev_start, prev_end, label
+    return None
+
+
+async def trend_line(
+    db: Database, user: UserSettings, period: str, start: dt.date, end: dt.date, total: int
+) -> Optional[str]:
+    """Сравнение с предыдущим таким же отрезком."""
+    previous = previous_range(period, start, end)
+    if previous is None:
+        return None
+
+    prev_start, prev_end, label = previous
+    prev_total, prev_count = await db.total_between(user.user_id, prev_start, prev_end)
+    if not prev_count:
+        return None
+
+    delta = total - prev_total
+    share = round(abs(delta) / prev_total * 100)
+    if share < 3:
+        return f"≈ Столько же, сколько {label} ({format_money(prev_total, user.currency)})."
+
+    icon = "🔺" if delta > 0 else "🔻"
+    word = "больше" if delta > 0 else "меньше"
+    return (
+        f"{icon} На <b>{share}%</b> {word}, чем {label}"
+        f" ({format_money(prev_total, user.currency)})."
+    )
+
+
+async def dynamics_lines(
+    db: Database, user: UserSettings, start: dt.date, end: dt.date
+) -> list[str]:
+    """Спарклайн по дням и самый дорогой день периода."""
+    window_start = max(start, end - dt.timedelta(days=SPARK_DAYS - 1))
+    totals = await db.daily_totals(user.user_id, window_start, end)
+    span = (end - window_start).days + 1
+    if span < 3 or len(totals) < 2:
+        return []
+
+    days = [window_start + dt.timedelta(days=offset) for offset in range(span)]
+    values = [totals.get(day, 0) for day in days]
+
+    peak_day = max(totals, key=lambda day: totals[day])
+    with_records = len(totals)
+    lines = [
+        "",
+        f"<b>По дням</b> <i>(последние {span} {days_word(span)})</i>",
+        f"<code>{sparkline(values)}</code>",
+        f"<i>Дороже всего {format_date(peak_day, end)} — "
+        f"{format_money(totals[peak_day], user.currency)} · "
+        f"{with_records} {days_word(with_records)} с тратами</i>",
+    ]
+    return lines
+
+
 async def build_report(
     db: Database, user: UserSettings, period: str, today: dt.date
 ) -> str:
@@ -56,11 +132,17 @@ async def build_report(
         header,
         f"Всего: <b>{format_money(total, user.currency)}</b> · "
         f"{count} {records_word(count)}",
-        "",
     ]
+
+    trend = await trend_line(db, user, period, start, end, total)
+    if trend:
+        lines.append(trend)
+    lines.append("")
 
     totals = await db.totals_by_category(user.user_id, start, end)
     lines.extend(render_breakdown(totals, total, user.currency))
+
+    lines.extend(await dynamics_lines(db, user, start, end))
 
     days = (end - start).days + 1
     if days > 1:

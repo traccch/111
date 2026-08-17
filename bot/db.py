@@ -523,6 +523,31 @@ class Database:
         row = await cur.fetchone()
         return row["total"]
 
+    async def daily_totals(
+        self, user_id: int, start: dt.date, end: dt.date
+    ) -> dict[dt.date, int]:
+        """Суммы по дням. Дни без трат в результат не попадают."""
+        cur = await self.conn.execute(
+            "SELECT spent_on, SUM(amount) AS total FROM expenses"
+            " WHERE user_id = ? AND spent_on BETWEEN ? AND ?"
+            " GROUP BY spent_on ORDER BY spent_on",
+            (user_id, start.isoformat(), end.isoformat()),
+        )
+        return {
+            dt.date.fromisoformat(row["spent_on"]): row["total"]
+            for row in await cur.fetchall()
+        }
+
+    async def monthly_totals(self, user_id: int, months: int = 12) -> list[tuple[str, int]]:
+        """Суммы по месяцам, от старых к новым: [('2026-08', 50250), …]."""
+        cur = await self.conn.execute(
+            "SELECT substr(spent_on, 1, 7) AS month, SUM(amount) AS total FROM expenses"
+            " WHERE user_id = ? GROUP BY month ORDER BY month DESC LIMIT ?",
+            (user_id, months),
+        )
+        rows = [(row["month"], row["total"]) for row in await cur.fetchall()]
+        return list(reversed(rows))
+
     async def first_expense_date(self, user_id: int) -> Optional[dt.date]:
         cur = await self.conn.execute(
             "SELECT MIN(spent_on) AS first FROM expenses WHERE user_id = ?", (user_id,)

@@ -15,10 +15,17 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.methods import SendDocument, SendMessage, TelegramMethod
+from aiogram.methods import (
+    EditMessageMedia,
+    SendDocument,
+    SendMessage,
+    SendPhoto,
+    TelegramMethod,
+)
 from aiogram.methods.base import TelegramType
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
+from bot import charts
 from bot.db import Database
 from bot.handlers import build_router
 from bot.middlewares import UserMiddleware
@@ -42,7 +49,7 @@ class RecordingBot(Bot):
 
     async def __call__(self, method: TelegramMethod[TelegramType], request_timeout=None):
         self.calls.append(method)
-        if isinstance(method, (SendMessage, SendDocument)):
+        if isinstance(method, (SendMessage, SendDocument, SendPhoto)):
             return Message(
                 message_id=len(self.calls),
                 date=dt.datetime.now(dt.timezone.utc),
@@ -223,6 +230,19 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         payload = documents[0].document.data.decode("utf-8-sig")
         self.assertIn("кофе", payload)
         self.assertIn("300,00", payload)
+
+    @unittest.skipUnless(charts.available(), "matplotlib не установлен")
+    async def test_chart_command(self):
+        self.assertIn("нечего рисовать", await self.send("/chart"))
+
+        await self.send("кофе 300")
+        await self.send("/chart")
+        photos = [call for call in self.bot.calls if isinstance(call, SendPhoto)]
+        self.assertEqual(len(photos), 1)
+
+        await self.click("chart:cats")
+        edits = [call for call in self.bot.calls if isinstance(call, EditMessageMedia)]
+        self.assertEqual(len(edits), 1)
 
     async def test_settings(self):
         self.assertIn("$", await self.send("/currency $"))

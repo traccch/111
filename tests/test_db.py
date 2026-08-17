@@ -10,7 +10,17 @@ from pathlib import Path
 import aiosqlite
 
 from bot.db import TOTAL_LIMIT_CATEGORY, Database
-from bot.services import build_report, check_limits, month_end, month_start, period_range
+from bot.formatting import sparkline
+from bot.services import (
+    build_report,
+    check_limits,
+    dynamics_lines,
+    month_end,
+    month_start,
+    period_range,
+    previous_range,
+    trend_line,
+)
 
 TODAY = dt.date(2026, 8, 16)
 USER_ID = 777
@@ -132,6 +142,105 @@ class DatabaseTest(unittest.IsolatedAsyncioTestCase):
 
         for period in ("day", "week", "month", "all"):
             self.assertTrue(await build_report(self.db, self.user, period, TODAY))
+
+
+class TrendTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self._tmp.name) / "test.db"), "Europe/Moscow", "₽")
+        await self.db.connect()
+        self.user = await self.db.ensure_user(USER_ID)
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self._tmp.cleanup()
+
+    async def spend(self, amount: int, on: dt.date):
+        await self.db.add_expense(USER_ID, amount, "тест", on, None)
+
+    async def test_previous_range_matches_same_days(self):
+        # 1–16 августа сравнивается с 1–16 июля, а не со всем июлем
+        self.assertEqual(
+            previous_range("month", dt.date(2026, 8, 1), dt.date(2026, 8, 16))[:2],
+            (dt.date(2026, 7, 1), dt.date(2026, 7, 16)),
+        )
+        self.assertEqual(
+            previous_range("week", dt.date(2026, 8, 10), dt.date(2026, 8, 16))[:2],
+            (dt.date(2026, 8, 3), dt.date(2026, 8, 9)),
+        )
+        self.assertEqual(
+            previous_range("day", TODAY, TODAY)[:2],
+            (dt.date(2026, 8, 15), dt.date(2026, 8, 15)),
+        )
+        self.assertIsNone(previous_range("all", dt.date(2026, 1, 1), TODAY))
+
+    async def test_previous_range_clamps_to_short_month(self):
+        # 1–30 марта не с чем сравнивать в феврале целиком — обрезаем по месяцу
+        start, end, _ = previous_range("month", dt.date(2026, 3, 1), dt.date(2026, 3, 30))
+        self.assertEqual((start, end), (dt.date(2026, 2, 1), dt.date(2026, 2, 28)))
+
+    async def test_trend_says_more_and_less(self):
+        await self.spend(100000, dt.date(2026, 7, 10))
+        await self.spend(150000, dt.date(2026, 8, 10))
+        line = await trend_line(
+            self.db, self.user, "month", dt.date(2026, 8, 1), TODAY, 150000
+        )
+        self.assertIn("50%", line)
+        self.assertIn("больше", line)
+
+        line = await trend_line(
+            self.db, self.user, "month", dt.date(2026, 8, 1), TODAY, 50000
+        )
+        self.assertIn("меньше", line)
+
+    async def test_trend_calls_small_difference_even(self):
+        await self.spend(100000, dt.date(2026, 7, 10))
+        line = await trend_line(
+            self.db, self.user, "month", dt.date(2026, 8, 1), TODAY, 101000
+        )
+        self.assertIn("Столько же", line)
+
+    async def test_trend_absent_without_history(self):
+        self.assertIsNone(
+            await trend_line(self.db, self.user, "month", dt.date(2026, 8, 1), TODAY, 5000)
+        )
+
+    async def test_daily_totals_and_dynamics(self):
+        await self.spend(30000, dt.date(2026, 8, 10))
+        await self.spend(20000, dt.date(2026, 8, 10))
+        await self.spend(90000, dt.date(2026, 8, 14))
+
+        totals = await self.db.daily_totals(USER_ID, dt.date(2026, 8, 1), TODAY)
+        self.assertEqual(totals, {dt.date(2026, 8, 10): 50000, dt.date(2026, 8, 14): 90000})
+
+        lines = await dynamics_lines(self.db, self.user, dt.date(2026, 8, 1), TODAY)
+        self.assertTrue(any("По дням" in line for line in lines))
+        peak = next(line for line in lines if "Дороже всего" in line)
+        self.assertIn("позавчера", peak)  # 14 августа при «сегодня» 16-го
+        self.assertIn("900", peak)
+
+    async def test_dynamics_needs_two_days(self):
+        await self.spend(30000, TODAY)
+        self.assertEqual(await dynamics_lines(self.db, self.user, TODAY, TODAY), [])
+
+    async def test_monthly_totals(self):
+        await self.spend(30000, dt.date(2026, 6, 10))
+        await self.spend(20000, dt.date(2026, 7, 10))
+        await self.spend(10000, dt.date(2026, 8, 10))
+        self.assertEqual(
+            await self.db.monthly_totals(USER_ID),
+            [("2026-06", 30000), ("2026-07", 20000), ("2026-08", 10000)],
+        )
+        self.assertEqual(len(await self.db.monthly_totals(USER_ID, months=2)), 2)
+
+
+class SparklineTest(unittest.TestCase):
+    def test_shape(self):
+        self.assertEqual(sparkline([]), "")
+        self.assertEqual(len(sparkline([1, 2, 3, 4])), 4)
+        self.assertEqual(sparkline([0, 100])[0], "▁")
+        self.assertEqual(sparkline([0, 100])[-1], "█")
+        self.assertEqual(sparkline([5, 5, 5]), "▅▅▅")
 
 
 class MigrationTest(unittest.IsolatedAsyncioTestCase):
