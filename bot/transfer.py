@@ -50,6 +50,19 @@ def _to_minor(value: Any) -> Optional[int]:
     return minor if 0 < minor < MAX_AMOUNT_MINOR else None
 
 
+def _amount_field(row: dict) -> tuple[Optional[int], bool]:
+    """Сумма и признак «всё в порядке».
+
+    Поля нет — (None, True), менять нечего. Поле есть, но в нём чепуха —
+    (None, False): такую строку надо не проглотить молча, а показать в числе
+    неразобранных.
+    """
+    if "amount" not in row or row["amount"] is None:
+        return None, True
+    amount = _to_minor(row["amount"])
+    return amount, amount is not None
+
+
 def dump(
     expenses: Sequence[Expense],
     categories: Sequence[Category],
@@ -155,17 +168,22 @@ def parse(
                 skipped += 1
             continue
 
-        amount = _to_minor(row.get("amount"))
+        amount, amount_ok = _amount_field(row)
         note = row.get("note")
         note = str(note).strip()[:200] if isinstance(note, str) else None
         category = str(row.get("category") or "").strip()
 
         spent_on: Optional[dt.date] = None
+        date_ok = True
         if row.get("date"):
             try:
                 spent_on = dt.date.fromisoformat(str(row["date"]))
             except ValueError:
-                spent_on = None
+                date_ok = False
+
+        if not (amount_ok and date_ok):
+            skipped += 1
+            continue
 
         if current is None:
             # запись без известного id — это новая трата, для неё нужна сумма

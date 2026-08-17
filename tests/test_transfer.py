@@ -135,6 +135,16 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(plan.skipped, 2)
         self.assertEqual(len(plan.of("create")), 1)  # id 999 не наш → это новая трата
 
+    def test_broken_field_in_known_row_is_not_silently_ignored(self):
+        """Мусор вместо суммы — это «не разобрал», а не «без изменений»."""
+        plan = transfer.parse(edited(**{"0": {"amount": "много"}}), EXISTING, TODAY)
+        self.assertEqual(plan.skipped, 1)
+        self.assertEqual(plan.unchanged, 1)
+        self.assertFalse(plan)
+
+        plan = transfer.parse(edited(**{"0": {"date": "вчера"}}), EXISTING, TODAY)
+        self.assertEqual(plan.skipped, 1)
+
     def test_bad_files_are_rejected_clearly(self):
         for payload, hint in (
             ("не json вовсе".encode("utf-8"), "не JSON"),
