@@ -8,11 +8,19 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
+from ..ai import AiClient
 from ..db import Database, Expense, UserSettings
 from ..formatting import esc, format_date, format_money, records_word
 from ..keyboards import category_picker, delete_buttons, expense_actions
-from ..parsing import ParseError, first_keyword, match_category, parse_expense
+from ..parsing import (
+    ParseError,
+    count_amounts,
+    first_keyword,
+    match_category,
+    parse_expense,
+)
 from ..services import check_limits
+from .ai_common import save_ai_expenses
 
 router = Router(name="expenses")
 
@@ -79,7 +87,7 @@ async def cmd_last(
 
 @router.message(F.text, ~F.text.startswith("/"))
 async def add_expense(
-    message: Message, db: Database, user: UserSettings, today: dt.date
+    message: Message, db: Database, user: UserSettings, today: dt.date, ai: AiClient
 ) -> None:
     text = (message.text or "").strip()
     try:
@@ -87,6 +95,13 @@ async def add_expense(
     except ParseError as exc:
         await message.answer(f"⚠️ {exc}")
         return
+
+    # Регулярка берёт из строки одну сумму. Если сумм несколько или не нашлось
+    # ни одной — зовём ИИ; он же разберёт «в пятёрочке 2340 и кофе 300» в две
+    # траты. Без ключа всё работает как раньше.
+    if ai.available() and (parsed is None or count_amounts(text) > 1):
+        if await _try_ai(message, db, user, today, ai, text, fallback_used=parsed is None):
+            return
 
     if parsed is None:
         await message.answer(
@@ -115,6 +130,55 @@ async def add_expense(
         lines.extend(warnings)
 
     await message.answer("\n".join(lines), reply_markup=expense_actions(expense))
+
+
+async def _try_ai(
+    message: Message,
+    db: Database,
+    user: UserSettings,
+    today: dt.date,
+    ai: AiClient,
+    text: str,
+    fallback_used: bool,
+) -> bool:
+    """Пробует разобрать сообщение моделью. True — трата записана."""
+    categories = await db.list_categories(user.user_id)
+    fallback = await db.get_fallback_category(user.user_id)
+    result = await ai.extract_from_text(
+        text,
+        [category.name for category in categories],
+        fallback.name if fallback else "Прочее",
+        user.currency,
+        today,
+    )
+
+    if result is None or not result.expenses:
+        return False
+    # Одна трата — обычный разбор надёжнее и уже справился, не мешаем ему.
+    if len(result.expenses) < 2 and not fallback_used:
+        return False
+
+    answer, markup = await save_ai_expenses(db, user, today, result, categories, fallback)
+    await message.answer(answer, reply_markup=markup)
+    return True
+
+
+@router.callback_query(F.data.startswith("delmany:"))
+async def cb_delete_many(
+    callback: CallbackQuery, db: Database, user: UserSettings
+) -> None:
+    raw = callback.data.split(":", 1)[1]
+    deleted = 0
+    for chunk in raw.split(","):
+        if chunk.isdigit() and await db.delete_expense(user.user_id, int(chunk)):
+            deleted += 1
+
+    await callback.answer("Удалено" if deleted else "Уже удалено")
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"🗑 Удалил {deleted} {records_word(deleted)}." if deleted else "🗑 Уже удалено.",
+            reply_markup=None,
+        )
 
 
 @router.callback_query(F.data.startswith("del:"))

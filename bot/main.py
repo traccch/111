@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
+from .ai import AiClient
 from .config import load_config
 from .db import Database
 from .handlers import build_router
@@ -24,6 +25,7 @@ COMMANDS = [
     BotCommand(command="add", description="Записать трату по шагам"),
     BotCommand(command="stats", description="Сводка расходов"),
     BotCommand(command="chart", description="Графики"),
+    BotCommand(command="insight", description="Разбор месяца словами"),
     BotCommand(command="last", description="Последние траты"),
     BotCommand(command="undo", description="Удалить последнюю трату"),
     BotCommand(command="limit", description="Лимит на месяц"),
@@ -51,6 +53,7 @@ async def run() -> None:
     )
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher["db"] = db
+    dispatcher["ai"] = AiClient(config.ai_api_key, config.ai_model, config.ai_timeout)
 
     middleware = UserMiddleware()
     dispatcher.message.middleware(middleware)

@@ -12,6 +12,7 @@ from . import (
     export,
     reminders,
     reports,
+    voice,
 )
 
 
@@ -25,6 +26,7 @@ def build_router() -> Router:
     router.include_router(reports.router)
     router.include_router(charts.router)
     router.include_router(export.router)
+    router.include_router(voice.router)
     router.include_router(expenses.router)
     return router
 

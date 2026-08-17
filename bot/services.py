@@ -8,6 +8,7 @@ from typing import Optional
 from .db import TOTAL_LIMIT_CATEGORY, Database, UserSettings
 from .formatting import (
     MONTHS_GENITIVE,
+    WEEKDAYS,
     days_word,
     esc,
     format_date,
@@ -159,6 +160,51 @@ async def build_report(
     if limit_block:
         lines.append("")
         lines.append(limit_block)
+
+    return "\n".join(lines)
+
+
+async def insight_summary(db: Database, user: UserSettings, today: dt.date) -> str:
+    """Голые цифры для модели: текущий месяц, прошлый и разбивка по категориям."""
+    start, end = month_start(today), today
+    total, count = await db.total_between(user.user_id, start, end)
+
+    lines = [
+        f"Валюта: {user.currency}",
+        f"Текущий период: {start:%d.%m.%Y} — {end:%d.%m.%Y}",
+        f"Всего потрачено: {total / 100:.2f} за {count} записей",
+        f"В среднем за день: {total / 100 / ((end - start).days + 1):.2f}",
+        "",
+        "По категориям в этом месяце:",
+    ]
+    for item in await db.totals_by_category(user.user_id, start, end):
+        share = round(item.total / total * 100) if total else 0
+        lines.append(f"- {item.name}: {item.total / 100:.2f} ({share}%, {item.count} записей)")
+
+    previous = previous_range("month", start, end)
+    if previous:
+        prev_start, prev_end, _ = previous
+        prev_total, prev_count = await db.total_between(user.user_id, prev_start, prev_end)
+        if prev_count:
+            lines.append("")
+            lines.append(
+                f"Тот же отрезок прошлого месяца ({prev_start:%d.%m} — {prev_end:%d.%m}): "
+                f"{prev_total / 100:.2f} за {prev_count} записей"
+            )
+            for item in await db.totals_by_category(user.user_id, prev_start, prev_end):
+                lines.append(f"- {item.name}: {item.total / 100:.2f}")
+
+    daily = await db.daily_totals(user.user_id, start, end)
+    if daily:
+        lines.append("")
+        lines.append("По дням:")
+        lines.extend(f"- {day:%d.%m} ({WEEKDAYS[day.weekday()]}): {amount / 100:.2f}"
+                     for day, amount in sorted(daily.items()))
+
+    limit = await db.get_limit(user.user_id, TOTAL_LIMIT_CATEGORY)
+    if limit:
+        lines.append("")
+        lines.append(f"Лимит на месяц: {limit / 100:.2f}")
 
     return "\n".join(lines)
 

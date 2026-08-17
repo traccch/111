@@ -130,6 +130,17 @@ def reminders_settings(
     return builder.as_markup()
 
 
+def delete_many(expense_ids: Sequence[int]) -> InlineKeyboardMarkup:
+    """Одна кнопка на всю пачку трат, записанных из одного сообщения."""
+    payload = ",".join(str(expense_id) for expense_id in expense_ids)
+    text = "🗑 Удалить всё" if len(expense_ids) > 1 else "🗑 Удалить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=f"delmany:{payload}")]
+        ]
+    )
+
+
 def delete_buttons(expenses: Sequence[Expense]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for expense in expenses:

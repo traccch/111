@@ -18,15 +18,17 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import (
     EditMessageMedia,
+    EditMessageText,
     SendDocument,
     SendMessage,
     SendPhoto,
     TelegramMethod,
 )
 from aiogram.methods.base import TelegramType
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, Update, User, Voice
 
 from bot import charts
+from bot.ai import AiExpense, AiResult
 from bot.db import Database
 from bot.handlers import build_router
 from bot.middlewares import UserMiddleware
@@ -51,12 +53,21 @@ class RecordingBot(Bot):
     async def __call__(self, method: TelegramMethod[TelegramType], request_timeout=None):
         self.calls.append(method)
         if isinstance(method, (SendMessage, SendDocument, SendPhoto)):
+            # as_(self) — иначе у ответа нет бота и .edit_text() на нём падает,
+            # хотя в бою aiogram привязывает его сам
             return Message(
                 message_id=len(self.calls),
                 date=dt.datetime.now(dt.timezone.utc),
                 chat=Chat(id=CHAT_ID, type="private"),
-            )
+            ).as_(self)
         return True
+
+    async def download(self, file, destination=None, **kwargs):
+        """Вместо похода в Telegram отдаём заранее известные байты."""
+        if destination is not None:
+            destination.write(b"OggS-fake-voice")
+            return destination
+        return None
 
     @property
     def texts(self) -> list[str]:
@@ -65,6 +76,52 @@ class RecordingBot(Bot):
             for call in self.calls
             if isinstance(call, SendMessage) and call.text is not None
         ]
+
+    @property
+    def last_shown(self) -> str:
+        """Последний текст, который увидел пользователь: отправленный или
+        вписанный поверх прежнего (хендлеры с «Слушаю…» правят своё сообщение)."""
+        for call in reversed(self.calls):
+            if isinstance(call, (SendMessage, EditMessageText)) and call.text:
+                return call.text
+        return ""
+
+
+class FakeAi:
+    """ИИ-клиент без сети: отдаёт заготовленный ответ и запоминает вызовы."""
+
+    def __init__(self, result: AiResult | None = None, insight_text: str | None = None,
+                 available: bool = False) -> None:
+        self._result = result
+        self._insight = insight_text
+        self._available = available
+        self.text_calls: list[str] = []
+        self.audio_calls: list[bytes] = []
+
+    def available(self) -> bool:
+        return self._available
+
+    async def extract_from_text(self, text, categories, fallback, currency, today):
+        self.text_calls.append(text)
+        return self._result
+
+    async def extract_from_audio(self, audio, mime, categories, fallback, currency, today):
+        self.audio_calls.append(audio)
+        return self._result
+
+    async def insight(self, summary):
+        return self._insight
+
+
+def ai_result(*expenses: tuple[int, str, str], transcript: str = "") -> AiResult:
+    today = dt.date.today()
+    return AiResult(
+        transcript=transcript,
+        expenses=tuple(
+            AiExpense(amount=amount, note=note, spent_on=today, category=category)
+            for amount, note, category in expenses
+        ),
+    )
 
 
 _dispatcher: Dispatcher | None = None
@@ -101,6 +158,8 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
 
         self.dp = get_dispatcher()
         self.dp["db"] = self.db
+        self.ai = FakeAi()
+        self.dp["ai"] = self.ai
         # диспетчер общий на весь прогон, поэтому состояние FSM из прошлого
         # теста иначе утекло бы в следующий
         self.dp.fsm.storage = MemoryStorage()
@@ -303,6 +362,106 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await self.click("chart:cats")
         edits = [call for call in self.bot.calls if isinstance(call, EditMessageMedia)]
         self.assertEqual(len(edits), 1)
+
+    # ------------------------------------------------------------------- ИИ
+
+    async def send_voice(self) -> str:
+        self._update_id += 1
+        message = make_message("", message_id=self._update_id)
+        message = message.model_copy(
+            update={
+                "text": None,
+                "voice": Voice(
+                    file_id="voice-1",
+                    file_unique_id="u1",
+                    duration=4,
+                    mime_type="audio/ogg",
+                    file_size=2048,
+                ),
+            }
+        )
+        await self.dp.feed_update(self.bot, Update(update_id=self._update_id, message=message))
+        return self.bot.last_shown
+
+    async def test_ai_splits_message_into_two_expenses(self):
+        self.dp["ai"] = FakeAi(
+            ai_result((234000, "пятёрочка", "Продукты"), (30000, "кофе", "Кафе")),
+            available=True,
+        )
+        answer = await self.send("в пятёрочке 2340 и кофе 300")
+
+        self.assertIn("Записал 2", answer)
+        expenses = await self.db.last_expenses(USER_ID)
+        self.assertEqual(len(expenses), 2)
+        self.assertEqual({expense.amount for expense in expenses}, {234000, 30000})
+        self.assertEqual(
+            {expense.category_name for expense in expenses}, {"Продукты", "Кафе"}
+        )
+
+    async def test_ai_is_not_asked_for_simple_text(self):
+        ai = FakeAi(ai_result((999999, "чушь", "Кафе")), available=True)
+        self.dp["ai"] = ai
+
+        await self.send("кофе 300")
+        self.assertEqual(ai.text_calls, [], "обычный разбор справился сам")
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 30000)
+
+    async def test_ai_rescues_unparsable_text(self):
+        self.dp["ai"] = FakeAi(ai_result((45000, "шаурма", "Кафе")), available=True)
+        answer = await self.send("отдал за шаурму четыреста пятьдесят рублей")
+
+        self.assertIn("450", answer)
+        self.assertEqual(len(await self.db.last_expenses(USER_ID)), 1)
+
+    async def test_ai_silence_falls_back_to_hint(self):
+        self.dp["ai"] = FakeAi(None, available=True)
+        self.assertIn("Не нашёл сумму", await self.send("совсем непонятное сообщение"))
+        self.assertEqual(await self.db.last_expenses(USER_ID), [])
+
+    async def test_delete_many_button(self):
+        self.dp["ai"] = FakeAi(
+            ai_result((234000, "пятёрочка", "Продукты"), (30000, "кофе", "Кафе")),
+            available=True,
+        )
+        await self.send("в пятёрочке 2340 и кофе 300")
+        expenses = await self.db.last_expenses(USER_ID)
+
+        await self.click("delmany:" + ",".join(str(item.id) for item in expenses))
+        self.assertEqual(await self.db.last_expenses(USER_ID), [])
+
+    async def test_voice_without_key(self):
+        self.assertIn("ключа нет", await self.send_voice())
+        self.assertEqual(await self.db.last_expenses(USER_ID), [])
+
+    async def test_voice_records_expenses(self):
+        ai = FakeAi(
+            ai_result((30000, "кофе", "Кафе"), transcript="кофе триста рублей"),
+            available=True,
+        )
+        self.dp["ai"] = ai
+
+        answer = await self.send_voice()
+        self.assertEqual(ai.audio_calls, [b"OggS-fake-voice"])
+        self.assertIn("Услышал", answer)
+        self.assertEqual((await self.db.last_expenses(USER_ID))[0].amount, 30000)
+
+    async def test_voice_with_nothing_recognised(self):
+        self.dp["ai"] = FakeAi(ai_result(), available=True)
+        self.assertIn("не разобрал", (await self.send_voice()).lower())
+
+    async def test_insight(self):
+        self.dp["ai"] = FakeAi(insight_text="Больше всего ушло на жильё.", available=True)
+        for text in ("кофе 300", "продукты 1200", "такси 450"):
+            await self.send(text)
+
+        await self.send("/insight")
+        self.assertIn("Больше всего ушло на жильё", self.bot.last_shown)
+
+    async def test_insight_needs_data_and_key(self):
+        self.assertIn("ключа нет", await self.send("/insight"))
+
+        self.dp["ai"] = FakeAi(insight_text="текст", available=True)
+        self.assertIn("мало данных", await self.send("/insight"))
 
     async def test_settings(self):
         self.assertIn("$", await self.send("/currency $"))

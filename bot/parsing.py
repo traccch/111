@@ -132,6 +132,12 @@ def parse_amount(text: str) -> Optional[tuple[int, str]]:
     return amount, rest
 
 
+def count_amounts(text: str) -> int:
+    """Сколько чисел, похожих на суммы, в строке. Больше одного — повод
+    показать сообщение модели: регулярка возьмёт только последнее."""
+    return len(_NUMBER.findall(strip_currency(text)))
+
+
 def parse_expense(text: str, today: Optional[dt.date] = None) -> Optional[ParsedExpense]:
     """Разбирает строку в трату. Возвращает None, если суммы в тексте нет."""
     today = today or dt.date.today()
